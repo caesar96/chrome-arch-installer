@@ -1,0 +1,488 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+APP_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+CHROME_LAUNCHER="$APP_DIR/google-chrome"
+FLAGS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/chrome-flags.conf"
+PACKAGES_URL="https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages"
+DEB_BASE_URL="https://dl.google.com/linux/chrome/deb"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/google-chrome-local"
+STATE_FILE="$STATE_DIR/update-state"
+LOCK_FILE="$STATE_DIR/update.lock"
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/google-chrome-local"
+INSTALLER_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/google-chrome-local-installer"
+DIALOG_SCRIPT="$APP_DIR/update-dialog.py"
+DIALOG_HTML="$APP_DIR/update-dialog.html"
+WORK_DIR=""
+
+LATEST_VERSION=""
+LATEST_URL=""
+LATEST_ETAG=""
+LATEST_SHA256=""
+INSTALLED_VERSION=""
+STATE_VERSION=""
+STATE_URL=""
+STATE_ETAG=""
+
+declare -a CHROME_FLAGS=()
+
+cleanup_work_dir() {
+    [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] && rm -rf -- "$WORK_DIR"
+}
+
+die() {
+    printf 'google-chrome-stable: %s\n' "$*" >&2
+    exit 1
+}
+
+require_commands() {
+    local command_name
+    for command_name in "$@"; do
+        command -v "$command_name" >/dev/null 2>&1 || \
+            die "Falta la herramienta requerida: $command_name"
+    done
+}
+
+load_flags() {
+    [[ -f "$FLAGS_FILE" ]] || return 0
+
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "${line:0:1}" == '#' ]] && continue
+        CHROME_FLAGS+=("$line")
+    done < "$FLAGS_FILE"
+}
+
+chrome_version_from() {
+    local chrome_dir="$1"
+    [[ -x "$chrome_dir/chrome" ]] || return 0
+    "$chrome_dir/chrome" --version 2>/dev/null | \
+        sed -n 's/^Google Chrome //p' | tr -d '[:space:]'
+}
+
+current_version() {
+    chrome_version_from "$APP_DIR"
+}
+
+chrome_running() {
+    local pid stat_line state
+    while IFS= read -r pid; do
+        [[ -n "$pid" && -r "/proc/$pid/stat" ]] || continue
+        stat_line="$(<"/proc/$pid/stat")"
+        state="${stat_line#*) }"
+        state="${state%% *}"
+        [[ "$state" != 'Z' ]] && return 0
+    done < <(pgrep -u "$(id -u)" -x chrome || true)
+    return 1
+}
+
+acquire_lock() {
+    mkdir -p -- "$STATE_DIR"
+    exec 9>"$LOCK_FILE"
+    flock -n 9
+}
+
+release_lock() {
+    flock -u 9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+}
+
+load_state() {
+    STATE_VERSION=""
+    STATE_URL=""
+    STATE_ETAG=""
+    [[ -r "$STATE_FILE" ]] || return 0
+
+    local key value
+    while IFS='=' read -r key value; do
+        case "$key" in
+            version) STATE_VERSION="$value" ;;
+            url) STATE_URL="$value" ;;
+            etag) STATE_ETAG="$value" ;;
+        esac
+    done < "$STATE_FILE"
+}
+
+write_state() {
+    local version="$1"
+    local url="$2"
+    local etag="$3"
+    local temporary="$STATE_FILE.$$"
+
+    mkdir -p -- "$STATE_DIR"
+    {
+        printf 'version=%s\n' "$version"
+        printf 'url=%s\n' "$url"
+        printf 'etag=%s\n' "$etag"
+    } > "$temporary"
+    mv -f -- "$temporary" "$STATE_FILE"
+}
+
+package_info() {
+    local metadata_file="$1"
+
+    curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --output "$metadata_file" "$PACKAGES_URL"
+
+    awk -v RS='' -v FS='\n' '
+        $1 == "Package: google-chrome-stable" {
+            version = ""
+            filename = ""
+            sha256 = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^Version: /) {
+                    version = $i
+                    sub(/^Version: /, "", version)
+                } else if ($i ~ /^Filename: /) {
+                    filename = $i
+                    sub(/^Filename: /, "", filename)
+                } else if ($i ~ /^SHA256: /) {
+                    sha256 = $i
+                    sub(/^SHA256: /, "", sha256)
+                }
+            }
+            if (version != "" && filename != "" && sha256 != "") {
+                printf "%s\t%s\t%s\n", version, filename, sha256
+                exit
+            }
+        }
+    ' "$metadata_file"
+}
+
+head_etag() {
+    curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --head "$1" | \
+        awk '
+            /^[Ee][Tt][Aa][Gg]:/ {
+                sub(/^[Ee][Tt][Aa][Gg]:[[:space:]]*/, "")
+                gsub(/\r/, "")
+                etag = $0
+            }
+            END {
+                if (etag != "") print etag
+            }
+        '
+}
+
+fetch_latest_info() {
+    local metadata_file package_data raw_version filename
+    mkdir -p -- "$CACHE_ROOT"
+    metadata_file="$(mktemp "$CACHE_ROOT/check.XXXXXXXX")"
+
+    if ! package_data="$(package_info "$metadata_file")"; then
+        rm -f -- "$metadata_file"
+        return 1
+    fi
+    rm -f -- "$metadata_file"
+    [[ -n "$package_data" ]] || return 1
+    IFS=$'\t' read -r raw_version filename LATEST_SHA256 <<< "$package_data"
+
+    LATEST_VERSION="${raw_version%-*}"
+    LATEST_URL="${DEB_BASE_URL}/${filename#/}"
+    if ! LATEST_ETAG="$(head_etag "$LATEST_URL")"; then
+        return 1
+    fi
+    [[ -n "$LATEST_ETAG" ]] || return 1
+    INSTALLED_VERSION="$(current_version || true)"
+}
+
+check_updates() {
+    fetch_latest_info || return 1
+    load_state
+
+    if [[ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
+        return 10
+    fi
+
+    if [[ -z "$STATE_ETAG" ]]; then
+        write_state "$LATEST_VERSION" "$LATEST_URL" "$LATEST_ETAG"
+        return 0
+    fi
+
+    if [[ "$STATE_VERSION" != "$LATEST_VERSION" || \
+        "$STATE_URL" != "$LATEST_URL" || \
+        "$STATE_ETAG" != "$LATEST_ETAG" ]]; then
+        return 10
+    fi
+    return 0
+}
+
+check_cli() {
+    require_commands curl awk sed tr flock
+    if ! acquire_lock; then
+        printf 'Ya hay una comprobación de actualizaciones en curso.\n'
+        return 0
+    fi
+
+    local result=0
+    if check_updates; then
+        printf 'No hay actualizaciones. ETag actual: %s\n' "$LATEST_ETAG"
+    else
+        result=$?
+        if [[ "$result" -eq 10 ]]; then
+            printf 'Hay una actualización disponible: %s\n' "$LATEST_VERSION"
+            printf 'ETag disponible: %s\n' "$LATEST_ETAG"
+        else
+            printf 'No se pudo comprobar la actualización.\n' >&2
+        fi
+    fi
+    release_lock
+    return 0
+}
+
+link_system_libraries() {
+    local stage_dir="$1"
+    local target name
+    while IFS=: read -r name target; do
+        [[ -e "$target" ]] || die "No se encuentra la biblioteca requerida: $target"
+        ln -sfn -- "$target" "$stage_dir/$name"
+    done <<'LIBRARIES'
+libnspr4.so.0d:/usr/lib/libnspr4.so
+libplds4.so.0d:/usr/lib/libplds4.so
+libplc4.so.0d:/usr/lib/libplc4.so
+libssl3.so.1d:/usr/lib/libssl3.so
+libnss3.so.1d:/usr/lib/libnss3.so
+libsmime3.so.1d:/usr/lib/libsmime3.so
+libnssutil3.so.1d:/usr/lib/libnssutil3.so
+LIBRARIES
+}
+
+cleanup_backups() {
+    chrome_running && return 0
+
+    local old_backups=()
+    shopt -s nullglob
+    old_backups=("$APP_DIR".backup.*)
+    shopt -u nullglob
+    ((${#old_backups[@]} == 0)) || rm -rf -- "${old_backups[@]}"
+}
+
+remove_owned_link() {
+    local link_path="$1"
+    [[ -L "$link_path" ]] || return 0
+    case "$(readlink -- "$link_path")" in
+        "$APP_DIR/google-chrome"|"$APP_DIR/google-chrome-stable")
+            rm -f -- "$link_path"
+            ;;
+    esac
+}
+
+uninstall_chrome() {
+    require_commands pgrep readlink
+    chrome_running && die "Cierra Chrome antes de desinstalarlo."
+
+    remove_owned_link "$HOME/.local/bin/google-chrome-stable"
+    remove_owned_link "$HOME/.local/bin/google-chrome"
+    rm -f -- "$HOME/.local/share/applications/google-chrome.desktop"
+    rm -rf -- "$APP_DIR" "$STATE_DIR" "$CACHE_ROOT" "$INSTALLER_CACHE_ROOT"
+
+    local old_backups=()
+    shopt -s nullglob
+    old_backups=("$APP_DIR".backup.*)
+    shopt -u nullglob
+    ((${#old_backups[@]} == 0)) || rm -rf -- "${old_backups[@]}"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$HOME/.local/share/applications" || true
+    fi
+    printf 'Google Chrome local fue desinstalado. El perfil %s se conservó.\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/google-chrome"
+}
+
+update_chrome() {
+    require_commands curl awk sed tr ar bsdtar sha256sum flock
+    if ! acquire_lock; then
+        die "Ya hay otra operación de Chrome en curso."
+    fi
+
+    mkdir -p -- "$CACHE_ROOT"
+    WORK_DIR="$(mktemp -d "$CACHE_ROOT/update.XXXXXXXX")"
+    trap cleanup_work_dir EXIT
+
+    fetch_latest_info || die "No se pudo obtener la información de Chrome estable."
+    load_state
+    if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" && \
+        -n "$STATE_ETAG" && "$STATE_ETAG" == "$LATEST_ETAG" && \
+        "$STATE_URL" == "$LATEST_URL" ]]; then
+        printf 'Google Chrome %s ya está actualizado.\n' "$INSTALLED_VERSION"
+        release_lock
+        return 0
+    fi
+    if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" && -z "$STATE_ETAG" ]]; then
+        write_state "$LATEST_VERSION" "$LATEST_URL" "$LATEST_ETAG"
+        printf 'Google Chrome %s ya está actualizado; ETag inicial guardada.\n' "$INSTALLED_VERSION"
+        release_lock
+        return 0
+    fi
+
+    local deb_file="$WORK_DIR/google-chrome-stable_${LATEST_VERSION}-1_amd64.deb"
+    printf 'Descargando Google Chrome %s desde:\n%s\n' "$LATEST_VERSION" "$LATEST_URL"
+    curl --fail --location --retry 3 --connect-timeout 15 --progress-bar \
+        --output "$deb_file" "$LATEST_URL"
+
+    local checksum_line actual_sha256
+    checksum_line="$(sha256sum "$deb_file")"
+    actual_sha256="${checksum_line%% *}"
+    [[ "$actual_sha256" == "$LATEST_SHA256" ]] || \
+        die "La suma SHA256 del paquete descargado no coincide."
+
+    local stage_dir="$WORK_DIR/payload"
+    mkdir -p -- "$stage_dir"
+    ar p "$deb_file" data.tar.xz | bsdtar -xpf - -C "$stage_dir" \
+        --strip-components=4 ./opt/google/chrome
+    [[ -e "$stage_dir/chrome-sandbox" ]] || die "El paquete no contiene chrome-sandbox."
+    chmod 0755 "$stage_dir/chrome-sandbox"
+    link_system_libraries "$stage_dir"
+
+    local custom_file
+    for custom_file in google-chrome-stable update-dialog.py update-dialog.html; do
+        [[ -f "$APP_DIR/$custom_file" ]] && cp -- "$APP_DIR/$custom_file" "$stage_dir/$custom_file"
+    done
+    chmod 0755 "$stage_dir/google-chrome-stable"
+
+    local staged_version
+    staged_version="$(chrome_version_from "$stage_dir")"
+    [[ "$staged_version" == "$LATEST_VERSION" ]] || \
+        die "La versión extraída no coincide con la versión descargada."
+
+    local backup_dir="${APP_DIR}.backup.$$"
+    [[ ! -e "$backup_dir" ]] || die "Ya existe un respaldo de actualización: $backup_dir"
+    mv -- "$APP_DIR" "$backup_dir"
+    if ! mv -- "$stage_dir" "$APP_DIR"; then
+        mv -- "$backup_dir" "$APP_DIR" || true
+        die "No se pudo activar la actualización."
+    fi
+    write_state "$LATEST_VERSION" "$LATEST_URL" "$LATEST_ETAG"
+
+    if chrome_running; then
+        printf 'Google Chrome actualizado a %s. Reinícialo para usar la nueva versión.\n' "$LATEST_VERSION"
+        printf 'Se conserva temporalmente: %s\n' "$backup_dir"
+    else
+        rm -rf -- "$backup_dir"
+        printf 'Google Chrome actualizado a %s en %s.\n' "$LATEST_VERSION" "$APP_DIR"
+    fi
+    release_lock
+}
+
+restart_chrome() {
+    require_commands pkill pgrep sleep
+    pkill -TERM -u "$(id -u)" -x chrome 2>/dev/null || true
+
+    local attempt
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        chrome_running || break
+        sleep 1
+    done
+    chrome_running && die "Chrome no se cerró después de 20 segundos."
+    cleanup_backups
+    CHROME_LOCAL_SKIP_UPDATE_CHECK=1 nohup "$APP_DIR/google-chrome-stable" \
+        >/dev/null 2>&1 </dev/null &
+}
+
+start_update_dialog() {
+    if command -v python3 >/dev/null 2>&1 && [[ -f "$DIALOG_SCRIPT" && -f "$DIALOG_HTML" ]]; then
+        CHROME_LOCAL_SKIP_UPDATE_CHECK=1 nohup python3 "$DIALOG_SCRIPT" \
+            --wrapper "$APP_DIR/google-chrome-stable" \
+            --version "$LATEST_VERSION" \
+            >/dev/null 2>&1 </dev/null &
+        return 0
+    fi
+
+    if command -v kdialog >/dev/null 2>&1; then
+        if kdialog --title 'Google Chrome update' \
+            --yes-label 'Update now' --no-label 'Later' \
+            --yesno "Google Chrome $LATEST_VERSION is available."; then
+            update_chrome
+            if kdialog --title 'Google Chrome update' \
+                --yes-label 'Restart Chrome' --no-label 'Later' \
+                --yesno 'The update is installed. Restart Chrome now?'; then
+                restart_chrome
+            fi
+        fi
+    fi
+}
+
+start_test_dialog() {
+    require_commands python3
+    local test_version
+    test_version="$(current_version || printf 'test')"
+    CHROME_LOCAL_SKIP_UPDATE_CHECK=1 nohup python3 "$DIALOG_SCRIPT" \
+        --wrapper "$APP_DIR/google-chrome-stable" \
+        --version "$test_version" \
+        --test \
+        >/dev/null 2>&1 </dev/null &
+}
+
+check_and_prompt() {
+    require_commands curl awk sed tr flock
+    acquire_lock || return 0
+
+    local result=0
+    check_updates >/dev/null 2>&1 || result=$?
+    release_lock
+    [[ "$result" -eq 10 ]] || return 0
+    start_update_dialog
+}
+
+schedule_background_check() {
+    [[ "${CHROME_LOCAL_SKIP_UPDATE_CHECK:-0}" == 1 ]] && return 0
+    CHROME_LOCAL_SKIP_UPDATE_CHECK=1 nohup "$SCRIPT_PATH" __check-and-prompt \
+        >/dev/null 2>&1 </dev/null &
+}
+
+usage() {
+    printf '%s\n' \
+        'Uso: google-chrome-stable [opciones de Chrome]' \
+        '     google-chrome-stable update' \
+        '     google-chrome-stable update --check' \
+        '     google-chrome-stable update --test-dialog' \
+        '     google-chrome-stable uninstall'
+}
+
+case "${1:-}" in
+    uninstall)
+        [[ "$#" -eq 1 ]] || die "uninstall no acepta argumentos adicionales."
+        uninstall_chrome
+        exit 0
+        ;;
+    update)
+        if [[ "${2:-}" == '--check' ]]; then
+            [[ "$#" -eq 2 ]] || die "update --check no acepta argumentos adicionales."
+            check_cli
+        elif [[ "${2:-}" == '--test-dialog' ]]; then
+            [[ "$#" -eq 2 ]] || die "update --test-dialog no acepta argumentos adicionales."
+            start_test_dialog
+        else
+            [[ "$#" -eq 1 ]] || die "update no acepta argumentos adicionales."
+            update_chrome
+        fi
+        exit 0
+        ;;
+    __check-and-prompt)
+        [[ "$#" -eq 1 ]] || exit 0
+        check_and_prompt
+        exit 0
+        ;;
+    __update-from-dialog)
+        [[ "$#" -eq 1 ]] || die "Comando interno inválido."
+        update_chrome
+        exit 0
+        ;;
+    __restart)
+        [[ "$#" -eq 1 ]] || die "Comando interno inválido."
+        restart_chrome
+        exit 0
+        ;;
+    --help|-h)
+        usage
+        exit 0
+        ;;
+esac
+
+[[ -x "$CHROME_LAUNCHER" ]] || die "No se encuentra el lanzador local de Chrome."
+schedule_background_check
+load_flags
+exec "$CHROME_LAUNCHER" "${CHROME_FLAGS[@]}" "$@"

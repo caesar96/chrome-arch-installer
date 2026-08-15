@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Google Chrome update</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      --page-bg: #111318;
+      --text: #f4f6fb;
+      --panel-bg: rgba(29, 32, 40, .92);
+      --panel-border: rgba(255, 255, 255, .12);
+      --muted: #abb3c5;
+      --brand: #b7c1d9;
+      --version-text: #d7e4ff;
+      --version-bg: rgba(66, 133, 244, .14);
+      --button-text: #f7f9ff;
+      --secondary-bg: rgba(255, 255, 255, .09);
+      --secondary-hover: rgba(255, 255, 255, .15);
+      --status: #9fb5df;
+      --error: #ff9e9e;
+      --blue-glow: rgba(66, 133, 244, .22);
+      --green-glow: rgba(52, 168, 83, .17);
+      background: var(--page-bg);
+      color: var(--text);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --page-bg: #f1f4f8;
+        --text: #152033;
+        --panel-bg: rgba(255, 255, 255, .94);
+        --panel-border: rgba(24, 39, 58, .14);
+        --muted: #596578;
+        --brand: #53627a;
+        --version-text: #2b5fa8;
+        --version-bg: rgba(66, 133, 244, .11);
+        --button-text: #ffffff;
+        --secondary-bg: rgba(24, 39, 58, .08);
+        --secondary-hover: rgba(24, 39, 58, .14);
+        --status: #5270a0;
+        --error: #bd3d4c;
+        --blue-glow: rgba(66, 133, 244, .16);
+        --green-glow: rgba(52, 168, 83, .12);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: block;
+      background:
+        radial-gradient(circle at 15% 10%, var(--blue-glow), transparent 34%),
+        radial-gradient(circle at 90% 90%, var(--green-glow), transparent 30%),
+        var(--page-bg);
+      overflow: auto;
+    }
+
+    .panel {
+      width: 100%;
+      min-height: 100vh;
+      padding: 30px;
+      border: 0;
+      border-radius: 0;
+      background: var(--panel-bg);
+      box-shadow: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--brand);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .brand-icon {
+      width: 18px;
+      height: 18px;
+      display: inline-block;
+      object-fit: contain;
+    }
+
+    h1 {
+      margin: 26px 0 10px;
+      font-size: 29px;
+      line-height: 1.05;
+      letter-spacing: -.035em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .version {
+      display: inline-flex;
+      margin-top: 18px;
+      padding: 7px 10px;
+      border-radius: 9px;
+      color: var(--version-text);
+      background: var(--version-bg);
+      font: 600 12px ui-monospace, SFMono-Regular, monospace;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    button {
+      flex: 1;
+      min-height: 42px;
+      border: 0;
+      border-radius: 11px;
+      color: var(--button-text);
+      cursor: pointer;
+      font: 700 14px ui-sans-serif, system-ui, sans-serif;
+      transition: transform .15s ease, background .15s ease, opacity .15s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { cursor: wait; opacity: .56; transform: none; }
+
+    .primary { background: #3f7ff0; }
+    .primary:hover { background: #5590f5; }
+    .secondary { background: var(--secondary-bg); }
+    .secondary:hover { background: var(--secondary-hover); }
+
+    #status {
+      min-height: 22px;
+      margin-top: 17px;
+      color: var(--status);
+      font-size: 13px;
+    }
+
+    #status.error { color: var(--error); }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <div class="brand"><img class="brand-icon" src="/icon.png" alt=""> Google Chrome</div>
+    <h1 id="title">Update available</h1>
+    <p id="message">A new Chrome package is available for your local installation.</p>
+    <div class="version" id="version"></div>
+    <div class="actions">
+      <button class="primary" id="primary">Update now</button>
+      <button class="secondary" id="secondary">Later</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+    const token = __UPDATE_TOKEN__;
+    const version = __UPDATE_VERSION__;
+    const title = document.querySelector('#title');
+    const message = document.querySelector('#message');
+    const versionLabel = document.querySelector('#version');
+    const primary = document.querySelector('#primary');
+    const secondary = document.querySelector('#secondary');
+    const status = document.querySelector('#status');
+    let action = 'update';
+
+    versionLabel.textContent = `Version ${version}`;
+
+    async function request(path) {
+      const response = await fetch(`${path}?token=${encodeURIComponent(token)}`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'The operation failed.');
+      return data;
+    }
+
+    function setStatus(text, error = false) {
+      status.textContent = text;
+      status.classList.toggle('error', error);
+    }
+
+    function closeWindow() {
+      window.close();
+      setStatus('You can close this window.');
+    }
+
+    secondary.addEventListener('click', async () => {
+      secondary.disabled = true;
+      primary.disabled = true;
+      try { await request('/api/later'); } catch (_) {}
+      closeWindow();
+    });
+
+    primary.addEventListener('click', async () => {
+      if (action === 'restart') {
+        primary.disabled = true;
+        secondary.disabled = true;
+        setStatus('Restarting Chrome...');
+        try { await request('/api/restart'); } catch (_) {}
+        closeWindow();
+        return;
+      }
+
+      primary.disabled = true;
+      secondary.disabled = true;
+      setStatus('Downloading and installing...');
+      try {
+        const result = await request('/api/update');
+        title.textContent = 'Update installed';
+        message.textContent = result.test
+          ? 'Test mode completed. No files were changed.'
+          : 'Chrome is ready to use the new version after a restart.';
+        action = 'restart';
+        primary.textContent = 'Restart Chrome';
+        primary.disabled = false;
+        secondary.disabled = false;
+        setStatus(result.test
+          ? 'This was a safe simulation.'
+          : 'The current Chrome session is still open.');
+      } catch (error) {
+        primary.disabled = false;
+        secondary.disabled = false;
+        setStatus(error.message, true);
+      }
+    });
+  </script>
+</body>
+</html>
