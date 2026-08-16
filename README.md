@@ -30,8 +30,10 @@ google-chrome-stable update
 google-chrome-stable uninstall
 ```
 
-`update --check` downloads only Google's package index and sends an HTTP HEAD
-request to compare the package ETag. It never downloads the `.deb`.
+`update --check` verifies Google's signed `InRelease` metadata, downloads only
+the package index, and sends an HTTP HEAD request to compare the package ETag.
+It never downloads the `.deb`. The installer and wrapper require `gpg` for
+this verification and pin Google's Linux Packages Signing Authority key.
 
 The wrapper reads one flag per line from
 `~/.config/chrome-flags.conf`. When a new package is detected, it opens a

@@ -7,7 +7,10 @@ BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/google-chrome-local-installer"
 PACKAGES_URL="https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages"
+INRELEASE_URL="https://dl.google.com/linux/chrome/deb/dists/stable/InRelease"
 DEB_BASE_URL="https://dl.google.com/linux/chrome/deb"
+GOOGLE_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_KEY_FINGERPRINT="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 WORK_DIR=""
 
 die() {
@@ -39,10 +42,86 @@ chrome_running() {
     return 1
 }
 
+verify_inrelease() {
+    local inrelease_file="$1"
+    local key_file keyring_dir status result=1
+
+    key_file="$(mktemp "$CACHE_ROOT/google-key.XXXXXXXX")"
+    keyring_dir="$(mktemp -d "$CACHE_ROOT/google-keyring.XXXXXXXX")"
+
+    if curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --output "$key_file" "$GOOGLE_KEY_URL" && \
+        gpg --batch --homedir "$keyring_dir" --import "$key_file" >/dev/null 2>&1 && \
+        gpg --batch --homedir "$keyring_dir" --with-colons --fingerprint | \
+            awk -F: -v expected="$GOOGLE_KEY_FINGERPRINT" '
+                $1 == "fpr" && toupper($10) == expected { found = 1 }
+                END { exit found ? 0 : 1 }
+            '
+    then
+        if status="$(gpg --batch --no-auto-key-retrieve --homedir "$keyring_dir" \
+            --status-fd=1 --verify "$inrelease_file" 2>/dev/null)"; then
+            if awk -v expected="$GOOGLE_KEY_FINGERPRINT" '
+                $1 == "[GNUPG:]" && $2 == "VALIDSIG" && toupper($NF) == expected {
+                    found = 1
+                }
+                END { exit found ? 0 : 1 }
+            ' <<< "$status"; then
+                result=0
+            fi
+        fi
+    fi
+
+    rm -rf -- "$key_file" "$keyring_dir"
+    return "$result"
+}
+
+verify_packages_metadata() {
+    local inrelease_file="$1"
+    local metadata_file="$2"
+    local expected_sha256 actual_sha256
+
+    expected_sha256="$(awk '
+        { gsub(/\r/, "") }
+        $1 == "SHA256:" { in_sha256 = 1; next }
+        in_sha256 && $3 == "main/binary-amd64/Packages" {
+            print $1
+            exit
+        }
+        in_sha256 && $1 ~ /^[A-Z][A-Za-z0-9-]*:$/ { exit }
+    ' "$inrelease_file")"
+    [[ "$expected_sha256" =~ ^[[:xdigit:]]{64}$ ]] || return 1
+
+    actual_sha256="$(sha256sum "$metadata_file")"
+    actual_sha256="${actual_sha256%% *}"
+    [[ "$actual_sha256" == "$expected_sha256" ]]
+}
+
 package_info() {
     local metadata_file="$1"
+    local inrelease_file="${metadata_file}.InRelease"
+
     curl --fail --location --retry 3 --connect-timeout 15 \
-        --silent --show-error --output "$metadata_file" "$PACKAGES_URL"
+        --silent --show-error --output "$inrelease_file" "$INRELEASE_URL" || {
+        rm -f -- "$inrelease_file"
+        return 1
+    }
+    if ! verify_inrelease "$inrelease_file"; then
+        printf 'Google repository signature verification failed.\n' >&2
+        rm -f -- "$inrelease_file"
+        return 1
+    fi
+    curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --output "$metadata_file" "$PACKAGES_URL" || {
+        rm -f -- "$inrelease_file"
+        return 1
+    }
+    if ! verify_packages_metadata "$inrelease_file" "$metadata_file"; then
+        printf 'Google package metadata checksum verification failed.\n' >&2
+        rm -f -- "$inrelease_file"
+        return 1
+    fi
+    rm -f -- "$inrelease_file"
+
     awk -v RS='' -v FS='\n' '
         $1 == "Package: google-chrome-stable" {
             version = filename = sha256 = ""
@@ -112,7 +191,7 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-require_commands curl awk ar bsdtar sha256sum sed tr mktemp readlink pgrep
+require_commands curl awk ar bsdtar sha256sum sed tr mktemp readlink pgrep gpg
 [[ "$(uname -m)" == 'x86_64' ]] || die 'This installer requires an x86_64 architecture.'
 [[ -f "$REPO_DIR/files/google-chrome-stable" ]] || die 'Missing files/google-chrome-stable.'
 [[ -f "$REPO_DIR/files/update-dialog.py" ]] || die 'Missing files/update-dialog.py.'

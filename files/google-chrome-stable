@@ -6,7 +6,10 @@ APP_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
 CHROME_LAUNCHER="$APP_DIR/google-chrome"
 FLAGS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/chrome-flags.conf"
 PACKAGES_URL="https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages"
+INRELEASE_URL="https://dl.google.com/linux/chrome/deb/dists/stable/InRelease"
 DEB_BASE_URL="https://dl.google.com/linux/chrome/deb"
+GOOGLE_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_KEY_FINGERPRINT="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/google-chrome-local"
 STATE_FILE="$STATE_DIR/update-state"
 LOCK_FILE="$STATE_DIR/update.lock"
@@ -121,11 +124,85 @@ write_state() {
     mv -f -- "$temporary" "$STATE_FILE"
 }
 
+verify_inrelease() {
+    local inrelease_file="$1"
+    local key_file keyring_dir status result=1
+
+    key_file="$(mktemp "$CACHE_ROOT/google-key.XXXXXXXX")"
+    keyring_dir="$(mktemp -d "$CACHE_ROOT/google-keyring.XXXXXXXX")"
+
+    if curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --output "$key_file" "$GOOGLE_KEY_URL" && \
+        gpg --batch --homedir "$keyring_dir" --import "$key_file" >/dev/null 2>&1 && \
+        gpg --batch --homedir "$keyring_dir" --with-colons --fingerprint | \
+            awk -F: -v expected="$GOOGLE_KEY_FINGERPRINT" '
+                $1 == "fpr" && toupper($10) == expected { found = 1 }
+                END { exit found ? 0 : 1 }
+            '
+    then
+        if status="$(gpg --batch --no-auto-key-retrieve --homedir "$keyring_dir" \
+            --status-fd=1 --verify "$inrelease_file" 2>/dev/null)"; then
+            if awk -v expected="$GOOGLE_KEY_FINGERPRINT" '
+                $1 == "[GNUPG:]" && $2 == "VALIDSIG" && toupper($NF) == expected {
+                    found = 1
+                }
+                END { exit found ? 0 : 1 }
+            ' <<< "$status"; then
+                result=0
+            fi
+        fi
+    fi
+
+    rm -rf -- "$key_file" "$keyring_dir"
+    return "$result"
+}
+
+verify_packages_metadata() {
+    local inrelease_file="$1"
+    local metadata_file="$2"
+    local expected_sha256 actual_sha256
+
+    expected_sha256="$(awk '
+        { gsub(/\r/, "") }
+        $1 == "SHA256:" { in_sha256 = 1; next }
+        in_sha256 && $3 == "main/binary-amd64/Packages" {
+            print $1
+            exit
+        }
+        in_sha256 && $1 ~ /^[A-Z][A-Za-z0-9-]*:$/ { exit }
+    ' "$inrelease_file")"
+    [[ "$expected_sha256" =~ ^[[:xdigit:]]{64}$ ]] || return 1
+
+    actual_sha256="$(sha256sum "$metadata_file")"
+    actual_sha256="${actual_sha256%% *}"
+    [[ "$actual_sha256" == "$expected_sha256" ]]
+}
+
 package_info() {
     local metadata_file="$1"
+    local inrelease_file="${metadata_file}.InRelease"
 
     curl --fail --location --retry 3 --connect-timeout 15 \
-        --silent --show-error --output "$metadata_file" "$PACKAGES_URL"
+        --silent --show-error --output "$inrelease_file" "$INRELEASE_URL" || {
+        rm -f -- "$inrelease_file"
+        return 1
+    }
+    if ! verify_inrelease "$inrelease_file"; then
+        printf 'Google repository signature verification failed.\n' >&2
+        rm -f -- "$inrelease_file"
+        return 1
+    fi
+    curl --fail --location --retry 3 --connect-timeout 15 \
+        --silent --show-error --output "$metadata_file" "$PACKAGES_URL" || {
+        rm -f -- "$inrelease_file"
+        return 1
+    }
+    if ! verify_packages_metadata "$inrelease_file" "$metadata_file"; then
+        printf 'Google package metadata checksum verification failed.\n' >&2
+        rm -f -- "$inrelease_file"
+        return 1
+    fi
+    rm -f -- "$inrelease_file"
 
     awk -v RS='' -v FS='\n' '
         $1 == "Package: google-chrome-stable" {
@@ -211,7 +288,7 @@ check_updates() {
 }
 
 check_cli() {
-    require_commands curl awk sed tr flock
+    require_commands curl awk sed tr flock gpg sha256sum mktemp
     if ! acquire_lock; then
         printf 'An update check is already in progress.\n'
         return 0
@@ -293,7 +370,7 @@ uninstall_chrome() {
 }
 
 update_chrome() {
-    require_commands curl awk sed tr ar bsdtar sha256sum flock
+    require_commands curl awk sed tr ar bsdtar sha256sum flock gpg mktemp
     if ! acquire_lock; then
         die "Another Chrome operation is already in progress."
     fi
@@ -417,7 +494,7 @@ start_test_dialog() {
 }
 
 check_and_prompt() {
-    require_commands curl awk sed tr flock
+    require_commands curl awk sed tr flock gpg sha256sum mktemp
     acquire_lock || return 0
 
     local result=0
