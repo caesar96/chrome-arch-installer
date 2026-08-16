@@ -280,5 +280,13 @@ if [[ -n "$backup_dir" ]]; then
     fi
 fi
 
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+        printf 'Note: %s is not currently in your PATH.\n' "$BIN_DIR"
+        printf 'Run: export PATH=%q:$PATH\n' "$BIN_DIR"
+        ;;
+esac
+
 printf 'Google Chrome %s installed at %s.\n' "$staged_version" "$APP_DIR"
 "$APP_DIR/google-chrome-stable" update --check

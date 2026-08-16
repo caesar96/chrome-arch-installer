@@ -12,7 +12,7 @@ installs the user launcher and registers the adapted desktop entry in
 Clone the repository and run the installer in one command:
 
 ```bash
-git clone --depth=1 https://github.com/caesar96/chrome-arch-installer.git && ./chrome-arch-installer/install.sh
+git clone --depth=1 https://github.com/caesar96/chrome-arch-installer.git && ./chrome-arch-installer/install.sh && export PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"
 ```
 
 Download and install the current stable package:
@@ -25,6 +25,13 @@ Install a package that is already downloaded:
 
 ```bash
 ./install.sh --deb ~/Downloads/google-chrome-stable_current_amd64.deb
+```
+
+The installer creates `${XDG_BIN_HOME:-$HOME/.local/bin}` for the command-line
+launchers. If it is not already in your `PATH`, run:
+
+```bash
+export PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"
 ```
 
 The installed wrapper supports:
