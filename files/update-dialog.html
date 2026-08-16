@@ -165,6 +165,104 @@
   </main>
 
   <script>
+    const translations = {
+      en: {
+        pageTitle: 'Google Chrome update',
+        updateAvailable: 'Update available',
+        newPackage: 'A new Chrome package is available for your local installation.',
+        version: 'Version',
+        updateNow: 'Update now',
+        later: 'Later',
+        operationFailed: 'The operation failed.',
+        closeWindow: 'You can close this window.',
+        restarting: 'Restarting Chrome...',
+        downloading: 'Downloading and installing...',
+        updateInstalled: 'Update installed',
+        testCompleted: 'Test mode completed. No files were changed.',
+        readyAfterRestart: 'Chrome is ready to use the new version after a restart.',
+        restartChrome: 'Restart Chrome',
+        safeSimulation: 'This was a safe simulation.',
+        sessionOpen: 'The current Chrome session is still open.'
+      },
+      es: {
+        pageTitle: 'Actualización de Google Chrome',
+        updateAvailable: 'Actualización disponible',
+        newPackage: 'Hay un nuevo paquete de Chrome disponible para tu instalación local.',
+        version: 'Versión',
+        updateNow: 'Actualizar ahora',
+        later: 'Más tarde',
+        operationFailed: 'La operación falló.',
+        closeWindow: 'Puedes cerrar esta ventana.',
+        restarting: 'Reiniciando Chrome...',
+        downloading: 'Descargando e instalando...',
+        updateInstalled: 'Actualización instalada',
+        testCompleted: 'Modo de prueba completado. No se modificaron archivos.',
+        readyAfterRestart: 'Chrome está listo para usar la nueva versión después de reiniciarlo.',
+        restartChrome: 'Reiniciar Chrome',
+        safeSimulation: 'Esta fue una simulación segura.',
+        sessionOpen: 'La sesión actual de Chrome sigue abierta.'
+      },
+      fr: {
+        pageTitle: 'Mise à jour de Google Chrome',
+        updateAvailable: 'Mise à jour disponible',
+        newPackage: 'Un nouveau paquet Chrome est disponible pour votre installation locale.',
+        version: 'Version',
+        updateNow: 'Mettre à jour',
+        later: 'Plus tard',
+        operationFailed: "L'opération a échoué.",
+        closeWindow: 'Vous pouvez fermer cette fenêtre.',
+        restarting: 'Redémarrage de Chrome...',
+        downloading: 'Téléchargement et installation...',
+        updateInstalled: 'Mise à jour installée',
+        testCompleted: "Mode test terminé. Aucun fichier n'a été modifié.",
+        readyAfterRestart: 'Chrome est prêt à utiliser la nouvelle version après un redémarrage.',
+        restartChrome: 'Redémarrer Chrome',
+        safeSimulation: 'Ceci était une simulation sans risque.',
+        sessionOpen: 'La session Chrome actuelle est toujours ouverte.'
+      },
+      zh: {
+        pageTitle: 'Google Chrome 更新',
+        updateAvailable: '有可用更新',
+        newPackage: '本地安装有新的 Chrome 软件包可用。',
+        version: '版本',
+        updateNow: '立即更新',
+        later: '稍后',
+        operationFailed: '操作失败。',
+        closeWindow: '您可以关闭此窗口。',
+        restarting: '正在重启 Chrome...',
+        downloading: '正在下载并安装...',
+        updateInstalled: '更新已安装',
+        testCompleted: '测试模式已完成。未更改任何文件。',
+        readyAfterRestart: '重启后，Chrome 即可使用新版本。',
+        restartChrome: '重启 Chrome',
+        safeSimulation: '这是一次安全模拟。',
+        sessionOpen: '当前 Chrome 会话仍处于打开状态。'
+      },
+      ru: {
+        pageTitle: 'Обновление Google Chrome',
+        updateAvailable: 'Доступно обновление',
+        newPackage: 'Доступен новый пакет Chrome для локальной установки.',
+        version: 'Версия',
+        updateNow: 'Обновить сейчас',
+        later: 'Позже',
+        operationFailed: 'Операция не выполнена.',
+        closeWindow: 'Это окно можно закрыть.',
+        restarting: 'Перезапуск Chrome...',
+        downloading: 'Загрузка и установка...',
+        updateInstalled: 'Обновление установлено',
+        testCompleted: 'Тестовый режим завершён. Файлы не изменялись.',
+        readyAfterRestart: 'После перезапуска Chrome будет готов использовать новую версию.',
+        restartChrome: 'Перезапустить Chrome',
+        safeSimulation: 'Это была безопасная симуляция.',
+        sessionOpen: 'Текущий сеанс Chrome всё ещё открыт.'
+      }
+    };
+
+    const browserLanguage = (navigator.language || 'en').toLowerCase();
+    const locale = ['es', 'fr', 'zh', 'ru'].find(
+      (candidate) => browserLanguage.startsWith(candidate)
+    ) || 'en';
+    const copy = translations[locale];
     const token = __UPDATE_TOKEN__;
     const version = __UPDATE_VERSION__;
     const title = document.querySelector('#title');
@@ -175,12 +273,18 @@
     const status = document.querySelector('#status');
     let action = 'update';
 
-    versionLabel.textContent = `Version ${version}`;
+    document.documentElement.lang = locale;
+    document.title = copy.pageTitle;
+    title.textContent = copy.updateAvailable;
+    message.textContent = copy.newPackage;
+    versionLabel.textContent = `${copy.version} ${version}`;
+    primary.textContent = copy.updateNow;
+    secondary.textContent = copy.later;
 
     async function request(path) {
       const response = await fetch(`${path}?token=${encodeURIComponent(token)}`, { method: 'POST' });
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || 'The operation failed.');
+      if (!response.ok || !data.ok) throw new Error(data.error || copy.operationFailed);
       return data;
     }
 
@@ -191,7 +295,7 @@
 
     function closeWindow() {
       window.close();
-      setStatus('You can close this window.');
+      setStatus(copy.closeWindow);
     }
 
     secondary.addEventListener('click', async () => {
@@ -205,7 +309,7 @@
       if (action === 'restart') {
         primary.disabled = true;
         secondary.disabled = true;
-        setStatus('Restarting Chrome...');
+        setStatus(copy.restarting);
         try { await request('/api/restart'); } catch (_) {}
         closeWindow();
         return;
@@ -213,20 +317,20 @@
 
       primary.disabled = true;
       secondary.disabled = true;
-      setStatus('Downloading and installing...');
+      setStatus(copy.downloading);
       try {
         const result = await request('/api/update');
-        title.textContent = 'Update installed';
+        title.textContent = copy.updateInstalled;
         message.textContent = result.test
-          ? 'Test mode completed. No files were changed.'
-          : 'Chrome is ready to use the new version after a restart.';
+          ? copy.testCompleted
+          : copy.readyAfterRestart;
         action = 'restart';
-        primary.textContent = 'Restart Chrome';
+        primary.textContent = copy.restartChrome;
         primary.disabled = false;
         secondary.disabled = false;
         setStatus(result.test
-          ? 'This was a safe simulation.'
-          : 'The current Chrome session is still open.');
+          ? copy.safeSimulation
+          : copy.sessionOpen);
       } catch (error) {
         primary.disabled = false;
         secondary.disabled = false;

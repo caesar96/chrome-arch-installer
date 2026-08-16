@@ -23,7 +23,7 @@ require_commands() {
     local command_name
     for command_name in "$@"; do
         command -v "$command_name" >/dev/null 2>&1 || \
-            die "Falta la herramienta requerida: $command_name"
+            die "Required command is missing: $command_name"
     done
 }
 
@@ -75,7 +75,7 @@ link_system_libraries() {
     local stage_dir="$1"
     local target name
     while IFS=: read -r name target; do
-        [[ -e "$target" ]] || die "No se encuentra la biblioteca requerida: $target"
+        [[ -e "$target" ]] || die "Required library not found: $target"
         ln -sfn -- "$target" "$stage_dir/$name"
     done <<'LIBRARIES'
 libnspr4.so.0d:/usr/lib/libnspr4.so
@@ -90,7 +90,7 @@ LIBRARIES
 
 usage() {
     printf '%s\n' \
-        'Uso: ./install.sh [--deb archivo.deb]' \
+        'Usage: ./install.sh [--deb file.deb]' \
         '       CHROME_APP_DIR=~/Apps/google-chrome ./install.sh'
 }
 
@@ -98,7 +98,7 @@ deb_override=""
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --deb)
-            [[ "$#" -ge 2 ]] || die '--deb necesita un archivo.'
+            [[ "$#" -ge 2 ]] || die '--deb requires a file.'
             deb_override="$2"
             shift 2
             ;;
@@ -107,17 +107,17 @@ while [[ "$#" -gt 0 ]]; do
             exit 0
             ;;
         *)
-            die "Argumento desconocido: $1"
+            die "Unknown argument: $1"
             ;;
     esac
 done
 
 require_commands curl awk ar bsdtar sha256sum sed tr mktemp readlink pgrep
-[[ "$(uname -m)" == 'x86_64' ]] || die 'Este instalador requiere una arquitectura x86_64.'
-[[ -f "$REPO_DIR/files/google-chrome-stable" ]] || die 'Falta files/google-chrome-stable.'
-[[ -f "$REPO_DIR/files/update-dialog.py" ]] || die 'Falta files/update-dialog.py.'
-[[ -f "$REPO_DIR/files/update-dialog.html" ]] || die 'Falta files/update-dialog.html.'
-[[ -f "$REPO_DIR/files/google-chrome.desktop.in" ]] || die 'Falta files/google-chrome.desktop.in.'
+[[ "$(uname -m)" == 'x86_64' ]] || die 'This installer requires an x86_64 architecture.'
+[[ -f "$REPO_DIR/files/google-chrome-stable" ]] || die 'Missing files/google-chrome-stable.'
+[[ -f "$REPO_DIR/files/update-dialog.py" ]] || die 'Missing files/update-dialog.py.'
+[[ -f "$REPO_DIR/files/update-dialog.html" ]] || die 'Missing files/update-dialog.html.'
+[[ -f "$REPO_DIR/files/google-chrome.desktop.in" ]] || die 'Missing files/google-chrome.desktop.in.'
 
 mkdir -p -- "$CACHE_ROOT" "$(dirname -- "$APP_DIR")"
 WORK_DIR="$(mktemp -d "$CACHE_ROOT/install.XXXXXXXX")"
@@ -127,16 +127,16 @@ deb_file=""
 expected_sha256=""
 if [[ -n "$deb_override" ]]; then
     deb_file="$(readlink -f -- "$deb_override")"
-    [[ -f "$deb_file" ]] || die "No existe el paquete: $deb_override"
+    [[ -f "$deb_file" ]] || die "Package does not exist: $deb_override"
     raw_version="$(version_from_deb "$deb_file")"
-    [[ -n "$raw_version" ]] || die 'No se pudo leer la versión del .deb.'
+    [[ -n "$raw_version" ]] || die 'Could not read the .deb version.'
 else
     package_data="$(package_info "$WORK_DIR/Packages")"
-    [[ -n "$package_data" ]] || die 'No se pudo obtener la información de Chrome estable.'
+    [[ -n "$package_data" ]] || die 'Could not retrieve stable Chrome package information.'
     IFS=$'\t' read -r raw_version filename expected_sha256 <<< "$package_data"
     deb_url="${DEB_BASE_URL}/${filename#/}"
     deb_file="$WORK_DIR/google-chrome-stable_${raw_version}_amd64.deb"
-    printf 'Descargando Google Chrome desde:\n%s\n' "$deb_url"
+    printf 'Downloading Google Chrome from:\n%s\n' "$deb_url"
     curl --fail --location --retry 3 --connect-timeout 15 --progress-bar \
         --output "$deb_file" "$deb_url"
 fi
@@ -145,14 +145,14 @@ if [[ -n "$expected_sha256" ]]; then
     checksum_line="$(sha256sum "$deb_file")"
     actual_sha256="${checksum_line%% *}"
     [[ "$actual_sha256" == "$expected_sha256" ]] || \
-        die 'La suma SHA256 del paquete descargado no coincide.'
+        die 'The SHA256 checksum of the downloaded package does not match.'
 fi
 
 stage_dir="$WORK_DIR/payload"
 mkdir -p -- "$stage_dir"
 ar p "$deb_file" data.tar.xz | bsdtar -xpf - -C "$stage_dir" \
     --strip-components=4 ./opt/google/chrome
-[[ -e "$stage_dir/chrome-sandbox" ]] || die 'El paquete no contiene chrome-sandbox.'
+[[ -e "$stage_dir/chrome-sandbox" ]] || die 'The package does not contain chrome-sandbox.'
 chmod 0755 "$stage_dir/chrome-sandbox"
 link_system_libraries "$stage_dir"
 cp -- "$REPO_DIR/files/google-chrome-stable" "$stage_dir/google-chrome-stable"
@@ -163,17 +163,17 @@ chmod 0755 "$stage_dir/google-chrome-stable" "$stage_dir/update-dialog.py"
 staged_version="$("$stage_dir/chrome" --version 2>/dev/null | sed -n 's/^Google Chrome //p' | tr -d '[:space:]')"
 expected_version="${raw_version%-*}"
 [[ "$staged_version" == "$expected_version" ]] || \
-    die 'La versión extraída no coincide con la versión del paquete.'
+    die 'The extracted version does not match the package version.'
 
 backup_dir=""
 if [[ -e "$APP_DIR" ]]; then
     backup_dir="${APP_DIR}.backup.install.$$"
-    [[ ! -e "$backup_dir" ]] || die "Ya existe: $backup_dir"
+    [[ ! -e "$backup_dir" ]] || die "Already exists: $backup_dir"
     mv -- "$APP_DIR" "$backup_dir"
 fi
 if ! mv -- "$stage_dir" "$APP_DIR"; then
     [[ -z "$backup_dir" ]] || mv -- "$backup_dir" "$APP_DIR" || true
-    die 'No se pudo activar la instalación.'
+    die 'Could not activate the installation.'
 fi
 
 mkdir -p -- "$BIN_DIR" "$DESKTOP_DIR"
@@ -195,11 +195,11 @@ fi
 
 if [[ -n "$backup_dir" ]]; then
     if chrome_running; then
-        printf 'Se conserva el respaldo mientras Chrome esté abierto: %s\n' "$backup_dir"
+        printf 'Keeping the backup while Chrome is open: %s\n' "$backup_dir"
     else
         rm -rf -- "$backup_dir"
     fi
 fi
 
-printf 'Google Chrome %s instalado en %s.\n' "$staged_version" "$APP_DIR"
+printf 'Google Chrome %s installed at %s.\n' "$staged_version" "$APP_DIR"
 "$APP_DIR/google-chrome-stable" update --check
