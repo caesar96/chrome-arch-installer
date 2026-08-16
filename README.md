@@ -9,6 +9,12 @@ installs the user launcher and registers the adapted desktop entry in
 
 ## Install
 
+Clone the repository and run the installer in one command:
+
+```bash
+git clone --depth=1 https://github.com/caesar96/chrome-arch-installer.git && ./chrome-arch-installer/install.sh
+```
+
 Download and install the current stable package:
 
 ```bash
